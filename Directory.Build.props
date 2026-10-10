@@ -1,0 +1,9 @@
+<Project>
+  <PropertyGroup>
+    <ElinGamePath Condition="'$(ElinGamePath)' == ''">C:\UserData\Steam\steamapps\common\Elin</ElinGamePath>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Meta>
+  <title>ElinGPT - Agent Bridge</title>
+  <id>elingpt.agentbridge</id>
+  <author>ElinGPT contributors</author>
+  <loadPriority>100</loadPriority>
+  <version>0.23.352</version>
+  <tags>Utility,Library</tags>
+  <description>Opt-in local observation and normal gameplay controls for external AI agents. F8 enables the bridge; F9 takes over. Requires an external agent connector. No model API keys are stored in this mod.</description>
+  <builtin>false</builtin>
+  <visibility>Unlisted</visibility>
+</Meta>

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\src\ElinGPT.Mod\CredentialDirectory.cs" Link="CredentialDirectory.cs" />
+    <Compile Include="..\..\src\ElinGPT.Mod\UiRevision.cs" Link="UiRevision.cs" />
+    <Compile Include="..\..\src\ElinGPT.Mod\PlacementText.cs" Link="PlacementText.cs" />
+    <ProjectReference Include="..\..\src\ElinGPT.Core\ElinGPT.Core.csproj" />
+    <Reference Include="Newtonsoft.Json" HintPath="$(ElinGamePath)\Elin_Data\Managed\Newtonsoft.Json.dll" Private="true" />
+  </ItemGroup>
+</Project>

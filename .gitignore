@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+**/__pycache__/
+.venv/
+dist/
+*.user
+connection.json
+*.jsonl
+.env

@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>ElinGPT.Mod</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net472" Version="1.0.3" PrivateAssets="all" />
+    <ProjectReference Include="..\ElinGPT.Core\ElinGPT.Core.csproj" />
+    <Reference Include="Elin" HintPath="$(ElinGamePath)\Elin_Data\Managed\Elin.dll" Private="false" />
+    <Reference Include="Newtonsoft.Json" HintPath="$(ElinGamePath)\Elin_Data\Managed\Newtonsoft.Json.dll" Private="false" />
+    <Reference Include="BepInEx.Core" HintPath="$(ElinGamePath)\BepInEx\core\BepInEx.Core.dll" Private="false" />
+    <Reference Include="BepInEx.Unity" HintPath="$(ElinGamePath)\BepInEx\core\BepInEx.Unity.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(ElinGamePath)\BepInEx\core\0Harmony.dll" Private="false" />
+    <Reference Include="Plugins" HintPath="$(ElinGamePath)\Elin_Data\Managed\Plugins.dll" Private="false" />
+    <Reference Include="Plugins.BaseCore" HintPath="$(ElinGamePath)\Elin_Data\Managed\Plugins.BaseCore.dll" Private="false" />
+    <Reference Include="Plugins.UI" HintPath="$(ElinGamePath)\Elin_Data\Managed\Plugins.UI.dll" Private="false" />
+    <Reference Include="Plugins.Modding" HintPath="$(ElinGamePath)\Elin_Data\Managed\Plugins.Modding.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(ElinGamePath)\Elin_Data\Managed\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(ElinGamePath)\Elin_Data\Managed\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.InputLegacyModule" HintPath="$(ElinGamePath)\Elin_Data\Managed\UnityEngine.InputLegacyModule.dll" Private="false" />
+    <Reference Include="UnityEngine.IMGUIModule" HintPath="$(ElinGamePath)\Elin_Data\Managed\UnityEngine.IMGUIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UI" HintPath="$(ElinGamePath)\Elin_Data\Managed\UnityEngine.UI.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(ElinGamePath)\Elin_Data\Managed\UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.TextRenderingModule" HintPath="$(ElinGamePath)\Elin_Data\Managed\UnityEngine.TextRenderingModule.dll" Private="false" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(ElinGamePath)\Elin_Data\Managed\Unity.TextMeshPro.dll" Private="false" />
+  </ItemGroup>
+  <Target Name="CheckGamePath" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(ElinGamePath)\Elin_Data\Managed\Elin.dll')" Text="Set ElinGamePath or -p:ElinGamePath to your installed game folder." />
+  </Target>
+</Project>
