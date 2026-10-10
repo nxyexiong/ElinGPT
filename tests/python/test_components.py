@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import copy
 import json
 import os
 import subprocess
@@ -14,6 +15,8 @@ from unittest.mock import patch
 
 from elingpt.client import BridgeClient, BridgeError
 from elingpt.mcp import McpServer
+from elingpt.guide import gameplay_guide, gameplay_instructions
+from elingpt.observation import apply_observation, _size
 from elingpt.runner import ModelClient, run, wait_for_action
 from elingpt.tools import TOOLS, validate
 
@@ -63,9 +66,12 @@ class ToolTests(unittest.TestCase):
             validate("elin_act", {**args, "direction": -1})
 
     def test_tool_names_and_required_action_fields(self):
-        self.assertEqual(len(TOOLS), 14)
+        self.assertEqual(len(TOOLS), 12)
         self.assertNotIn("elin_capture", {tool["name"] for tool in TOOLS})
         self.assertEqual(validate("elin_observe", {}), "observe")
+        self.assertEqual(validate("elin_observe", {"mode": "full", "since": "baseline:2"}), "observe")
+        with self.assertRaises(BridgeError):
+            validate("elin_observe", {"mode": "raw"})
         good = {"session_id": "s", "expected_revision": 1, "kind": "step", "dx": 1, "dz": 0}
         self.assertEqual(validate("elin_act", good), "act")
         for bad in [{**good, "dx": True}, {**good, "dx": 2},
@@ -96,6 +102,9 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(validate("elin_ui_observe", {"view": "decisions"}), "ui_observe")
         with self.assertRaises(BridgeError):
             validate("elin_ui_observe", {"view": "screenshot"})
+        for args in ({"offset": 1}, {"view": "tree", "max_bytes": 4096}, {"max_bytes": 100}):
+            with self.assertRaises(BridgeError):
+                validate("elin_ui_observe", args)
         for args in [{"operation": "click", "node_id": "button"},
                      {"operation": "key", "key": "enter"},
                      {"operation": "key", "key": "i"},
@@ -124,6 +133,7 @@ class McpTests(unittest.TestCase):
         result = self.initialize()
         self.assertEqual(result["result"]["protocolVersion"], "2025-03-26")
         self.assertFalse(self.client.calls)
+        self.assertIn(gameplay_instructions(), result["result"]["instructions"])
         self.assertIsNone(self.server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
 
     def test_tools_require_initialization(self):
@@ -150,17 +160,66 @@ class McpTests(unittest.TestCase):
                 self.assertFalse(result["isError"])
                 self.assertEqual(result["content"][0]["type"], "text")
 
-    def test_ui_decisions_are_opt_in_and_never_sent_as_game_arguments(self):
+    def test_ui_decisions_are_default_and_connector_options_do_not_reach_game(self):
         self.initialize()
         self.client.ui["nodes"].append({"id": "button", "label": "Accept", "actions": ["click"]})
-        for view in ("tree", "decisions"):
+        for view in (None, "tree", "decisions"):
+            args = {"root_id": "canvas"}
+            if view is not None:
+                args["view"] = view
+            if view != "tree":
+                args.update(max_bytes=2048, offset=0)
             result = self.server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-                "name": "elin_ui_observe", "arguments": {"view": view, "root_id": "canvas"}}})["result"]
+                "name": "elin_ui_observe", "arguments": args}})["result"]
             self.assertFalse(result["isError"])
             value = json.loads(result["content"][0]["text"])
-            self.assertEqual(value["ui"]["format"], "decision_nodes" if view == "decisions" else "gameobject_tree")
+            self.assertEqual(value["ui"]["format"], "gameobject_tree" if view == "tree" else "decision_nodes")
             self.assertEqual(self.client.calls[-1], ("ui_observe", {"root_id": "canvas"}))
         self.assertEqual(self.client.ui["format"], "gameobject_tree")
+
+    def call(self, name, args=None):
+        result = self.server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                     "params": {"name": name, "arguments": args or {}}})["result"]
+        self.assertFalse(result["isError"], result)
+        return json.loads(result["content"][0]["text"])
+
+    def test_observe_auto_full_and_baseline_recovery(self):
+        self.initialize()
+        first = self.call("elin_observe")
+        delta = self.call("elin_observe", {"since": first["observation_id"]})
+        self.assertTrue(delta["delta"])
+        state = apply_observation(apply_observation(None, first), delta)
+        self.assertEqual(state["revision"], 1)
+        self.assertNotIn("delta", self.call("elin_observe", {"since": "lost"}))
+        self.assertNotIn("delta", self.call("elin_observe", {"mode": "full"}))
+        self.assertTrue(all(args == {} for method, args in self.client.calls if method == "observe"))
+
+    def test_legacy_aliases_remain_accepted_but_are_optional_in_tool_list(self):
+        self.initialize()
+        self.assertNotIn("elin_ui_choose", {tool["name"] for tool in self.server.tools})
+        self.call("elin_ui_choose", {"session_id": "s", "expected_revision": 1, "choice_id": "button"})
+        self.assertEqual(len(McpServer(self.client, compat_tools=True).tools), 14)
+
+    def test_status_polling_is_internal_and_uses_ten_second_budget(self):
+        self.initialize()
+        with patch("elingpt.mcp.time.monotonic", return_value=100), patch(
+                "elingpt.mcp.wait_for_action", return_value={"action": {"status": "completed"}}) as wait:
+            self.call("elin_action_status", {"action_id": "a"})
+            wait.assert_called_once_with(self.client, "a", 110, cancel_on_timeout=False)
+        self.assertEqual(self.client.calls, [])
+
+    def test_ping_metrics_match_emitted_bytes_without_recursive_accounting(self):
+        self.initialize()
+        full = self.call("elin_observe")
+        self.call("elin_observe")
+        ping = self.call("elin_ping")
+        info = ping["connector"]
+        self.assertEqual(ping["gameplay_guide"], gameplay_guide())
+        self.assertEqual(info["view_version"], 2)
+        self.assertEqual(info["metrics"]["elin_observe"]["calls"], 2)
+        self.assertEqual(info["metrics"]["elin_observe"]["max_bytes"], _size(full))
+        self.assertNotIn("elin_ping", info["metrics"])
+        self.assertEqual(self.server.metrics.tools["elin_ping"]["bytes"], _size(ping))
 
     def test_stdio_output_and_eof_cleanup(self):
         source = io.BytesIO(b'{broken}\n{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
@@ -178,6 +237,97 @@ class McpTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_one_current_state_reuses_action_observations_without_history_replay(self):
+        class StatefulClient(StubClient):
+            def snapshot(self):
+                return {"session_id": "s", "revision": self.revision, "status": "playing",
+                        "state": {"ui": copy.deepcopy(self.ui), "inventory": [
+                            {"handle": f"item:{i}", "name": f"Repeated inventory object {i}",
+                             "count": 1, "equipped": False, "location": "inventory"} for i in range(100)]}}
+
+            def call(self, method, args=None):
+                result = super().call(method, args)
+                if method == "observe":
+                    return self.snapshot()
+                if method == "act":
+                    self.revision += 1
+                if method == "action_status":
+                    return {"action": {"action_id": "a", "status": "completed"}, "observation": self.snapshot()}
+                return result
+
+        requests = []
+
+        class Model:
+            def complete(self, messages, **kwargs):
+                requests.append(copy.deepcopy(messages))
+                current = json.loads(messages[-1]["content"].split("\n", 1)[1])
+                assert gameplay_instructions() in messages[0]["content"]
+                if len(requests) == 7:
+                    return {"role": "assistant", "content": "Finished."}
+                return {"role": "assistant", "tool_calls": [{"id": f"call:{len(requests)}", "type": "function",
+                        "function": {"name": "elin_act", "arguments": json.dumps({
+                            "session_id": "s", "expected_revision": current["revision"], "kind": "wait"})}}]}
+
+        client = StatefulClient()
+        with patch("sys.stdout", new=io.StringIO()):
+            run(client, Model(), "Six safe actions", max_steps=7)
+        self.assertEqual(sum(method == "observe" for method, _ in client.calls), 1)
+        self.assertEqual(sum(method == "act" for method, _ in client.calls), 6)
+        for i, messages in enumerate(requests):
+            self.assertEqual(sum(message.get("content", "").count('"inventory":') for message in messages), 1)
+            self.assertEqual(sum(message["role"] == "user" for message in messages), 1)
+            self.assertLessEqual(sum(message["role"] == "tool" for message in messages), 4)
+            current = json.loads(messages[-1]["content"].split("\n", 1)[1])
+            self.assertEqual(current["revision"], i + 1)
+        self.assertLess(_size(requests[-1]), _size(requests[0]) + 4000)
+        self.assertTrue(client.closed)
+
+    def test_stale_action_refreshes_state_without_replaying_mutation(self):
+        client = StubClient()
+        native_call = client.call
+
+        def call(method, args=None):
+            result = native_call(method, args)
+            if method == "act":
+                client.revision += 1
+                raise BridgeError("stale_observation", "Refresh before deciding again.")
+            return result
+
+        class Model:
+            calls = 0
+
+            def complete(self, messages, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"role": "assistant", "tool_calls": [{"id": "1", "type": "function", "function": {
+                        "name": "elin_act", "arguments": '{"session_id":"s","expected_revision":1,"kind":"wait"}'}}]}
+                assert "stale_observation" in json.dumps(messages)
+                assert json.loads(messages[-1]["content"].split("\n", 1)[1])["revision"] == 2
+                return {"role": "assistant", "content": "Stopped after refresh."}
+
+        with patch.object(client, "call", side_effect=call), patch("sys.stdout", new=io.StringIO()):
+            run(client, Model(), "Wait", max_steps=2)
+        self.assertEqual(sum(method == "act" for method, _ in client.calls), 1)
+        self.assertEqual(sum(method == "observe" for method, _ in client.calls), 2)
+
+    def test_invalid_tool_name_is_reported_without_breaking_metrics(self):
+        class Model:
+            calls = 0
+
+            def complete(self, messages, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"role": "assistant", "tool_calls": [{"id": "bad", "function": {
+                        "name": [], "arguments": "{}"}}]}
+                assert "unknown_tool" in json.dumps(messages)
+                return {"role": "assistant", "content": "Stopped."}
+
+        client, metrics = StubClient(), io.StringIO()
+        with patch("sys.stdout", new=io.StringIO()):
+            run(client, Model(), "Observe", max_steps=2, metrics=metrics)
+        self.assertIn("invalid_tool_call", metrics.getvalue())
+        self.assertTrue(client.closed)
+
     def test_remote_privacy_and_url_guards(self):
         with self.assertRaises(BridgeError):
             ModelClient("https://example.invalid/v1", "model", "KEY", False)
@@ -353,7 +503,9 @@ class LoopbackIntegrationTests(unittest.TestCase):
 
     def test_real_client_against_actual_csharp_transport(self):
         with BridgeClient(self.descriptor) as client:
-            self.assertEqual(client.call("ping")["schema_version"], "1")
+            ping = client.call("ping")
+            self.assertEqual(ping["schema_version"], "1")
+            self.assertEqual(ping["gameplay_guide"], gameplay_guide())
             state = client.call("claim", {"name": "Integration agent"})
             args = {"session_id": state["session_id"], "expected_revision": state["revision"], "kind": "wait"}
             action = client.call("act", args, request_id="one-action")
@@ -393,7 +545,7 @@ class LoopbackIntegrationTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stderr)
         responses = [json.loads(line) for line in process.stdout.splitlines()]
         self.assertEqual(len(responses), 3)
-        self.assertEqual(len(responses[1]["result"]["tools"]), 14)
+        self.assertEqual(len(responses[1]["result"]["tools"]), 12)
         self.assertFalse(responses[2]["result"]["isError"])
         self.assertIn("Test\u300c\u03bb\u300d", process.stdout)
 
@@ -428,7 +580,8 @@ class LoopbackIntegrationTests(unittest.TestCase):
                 message = {"role": "assistant", "content": "Waiting one normal turn.",
                            "tool_calls": [{"id": "mock-call", "type": "function", "function": {
                                "name": "elin_act", "arguments": json.dumps(args)}}]}
-                body = json.dumps({"choices": [{"message": message}]}).encode()
+                body = json.dumps({"choices": [{"message": message}],
+                                   "usage": {"prompt_tokens": 123, "completion_tokens": 17, "total_tokens": 140}}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -446,6 +599,7 @@ class LoopbackIntegrationTests(unittest.TestCase):
             self.assertEqual(len(payloads), 1)
             self.assertFalse(payloads[0]["parallel_tool_calls"])
             self.assertEqual(payloads[0]["model"], "fake-model")
+            self.assertEqual(model.last_usage["total_tokens"], 140)
             with BridgeClient(self.descriptor) as observer:
                 self.assertIsNone(observer.call("observe")["controller"])
         finally:

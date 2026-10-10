@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "coordinates": {
+    "axes": ["x", "z"],
+    "north": [0, 1],
+    "south": [0, -1],
+    "east": [1, 0],
+    "west": [-1, 0],
+    "local_projection": "Isometric: x+ appears down-right; z+ appears up-right. Screen-up is (-1,+1), screen-left is (-1,-1). Do not confuse screen directions with world cardinal directions.",
+    "region_projection": "Overworld is top-down: x+ is right/east, z+ is up/north. Increasing grid row z goes NORTH, not south.",
+    "scope": "Local-zone and overworld positions are separate coordinate spaces. Verify zone and position after travel. Step deltas are map axes, independent of remapped/alternate keyboard axes."
+  },
+  "basics": [
+    "Target arithmetic: destination=(player.x+dx,player.z+dz). Use world act(step/context) for movement; UI arrow keys navigate UI and are not a world-movement API.",
+    "World: discover actions at a visible tile; use advertised Walk here for native multi-tile pathfinding. A step can interact, attack, or open a door instead of moving. Check arrival, messages and action outcome. Border exits can require confirmation.",
+    "Turns: actions may consume multiple turns. Claimed control pauses at decision boundaries, not during ongoing jobs. UI animation is not a world turn. Poll running actions; resolve awaiting_ui before continuing. Never replay an accepted mutation.",
+    "UI: use exact labels and advertised node IDs/operations. Hover reveals native tooltips; current node handles are not persistent. Page or query a subtree when controls are omitted. Read choices before Enter/click; Escape dismisses the current layer, not necessarily all UI.",
+    "Inventory: equipped=true means worn/wielded; held_item is the selected tool/building item, not proof of combat equipment. Click carries an item; click a slot to place it. Check drag_active. Right-click is native quick-use (e.g. read a recipe/select a tool); inspect first. Hover then the configured middle-click shortcut (default r) opens its action menu.",
+    "Capacity: a full backpack can remove Pick from available actions and reject auto-pickup. Free a slot by learning useful recipes, using storage, or deliberately dropping an unwanted item. Grab is not proof an item entered inventory; confirm inventory afterward.",
+    "Crafting: inspect the native recipe, ingredient selectors, quantity and stamina cost. Different materials may not combine into the selected stack; junk stone is not the same ingredient as stone. Harvested resources can remain on the ground. Skill/material requirements must be verified in UI.",
+    "Safety: watch HP, stamina, hunger, conditions and hostiles. Avoid exhaustion; rest and secure edible food. Harvesting tools may be unsuitable weapons. Verify actual equipped weapon/armor before dangerous travel. A generic companion puppy is not proof that the rescue quest is complete; verify journal/dialogue.",
+    "Walls/corners: wall/fence variant 0 draws the x-axis segment, 1 the z-axis segment, and 2 both segments in a FIXED orientation, not a universal corner. Do NOT set all four corners to 2: that creates protruding arms. For an axis-aligned rectangle, southeast (max x,min z) uses 2, southwest uses 1, northeast uses 0; the northwest corner can be an empty tile joined by the x-wall to its east and z-wall to its south. Native isWallEdge (observed as wall_edge=true) closes that join even with block=0. Judge segment connectivity, not just occupied perimeter cells. full_wall is a separate renderer flag, not a corner indicator.",
+    "To adjust an existing wall, hold a wall block, discover the target tile's Rotate block action, and verify placement.operation=rotate_existing_block. Native rotation cycles 0->1->2->0; wrapping 2->0 also toggles cross_wall (material selection at dual-axis joins), so inspect both fields. rotate_held changes only the pending placement recipe, not an existing wall. Use normal dismantling for an extra piece; verify joins and doorway rather than preserving an incorrect wall count. Approach from inside if a wall face is not targetable outside.",
+    "Orientation: other direction/tile variants are native indices, not universal compass headings. Use placement/block_axis and observe rotations. Do not infer facing from row order or an inventory slot position.",
+    "Control: claim explicitly; human input/F9/disconnect releases ownership. Do not automatically reclaim after takeover. Use native save/death/revival dialogs; never alter save files or bypass confirmations."
+  ]
+}

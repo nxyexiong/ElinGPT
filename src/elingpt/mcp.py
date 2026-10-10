@@ -9,18 +9,22 @@ from typing import Any, BinaryIO, TextIO
 
 from . import __version__
 from .client import MAX_REQUEST, BridgeClient, BridgeError
-from .observation import ObservationStream, ui_decision_view
+from .guide import gameplay_guide, gameplay_instructions
+from .observation import ObservationStream, VIEW_INSTRUCTIONS, VIEW_VERSION, ui_decision_view
 from .runner import wait_for_action
-from .tools import TOOLS, validate
+from .telemetry import Metrics
+from .tools import ALL_TOOLS, TOOLS, bridge_arguments, validate
 
 SUPPORTED_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 
 
 class McpServer:
-    def __init__(self, client: BridgeClient):
+    def __init__(self, client: BridgeClient, *, metrics: TextIO | None = None, compat_tools: bool = False):
         self.client = client
         self.initialized = False
         self.observations = ObservationStream()
+        self.metrics = Metrics(metrics)
+        self.tools = ALL_TOOLS if compat_tools else TOOLS
 
     @staticmethod
     def error(identifier: Any, code: int, message: str) -> dict[str, Any]:
@@ -45,45 +49,50 @@ class McpServer:
             result = {"protocolVersion": version if version in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[-1],
                       "capabilities": {"tools": {"listChanged": False}},
                       "serverInfo": {"name": "elingpt", "version": __version__},
-                      "instructions": "Observe before acting. Claim control explicitly. Use one action at a time "
-                      "and query its status. Mutations/status may return delta observations: apply state_delta as "
-                      "top-level replacements, state_removed as deletions, ui_delta.meta as metadata, and UI upsert/"
-                      "removed by node ID, based on base_revision. terrain_delta upserts rows keyed by their first "
-                      "two columns (x,z), removes listed coordinates, and optionally supplies the complete coordinate "
-                      "order; otherwise retain order and append new rows. Observe returns a full baseline whenever needed. "
-                      "Terrain includes all valid tiles within player position +/- limits.radius, without character "
-                      "line-of-sight filtering. Removed coordinates leave the observation window, not the world; "
-                      "a cleared wall is an upsert with block=0. Entity visibility and action legality remain restricted. "
-                      "A running action is not complete; poll its ID without resubmitting. "
-                      "Human input/F9 takes over; never automatically reclaim control."}
+                      "instructions": "Claim control explicitly. Use one action at a time; poll its ID only if "
+                      "still running. Human input/F9 takes over; never automatically reclaim.\n" +
+                      gameplay_instructions() + "\n" + VIEW_INSTRUCTIONS}
         elif method == "ping":
             result = {}
         elif not self.initialized:
             return self.error(identifier, -32000, "Initialize the MCP session first")
         elif method == "tools/list":
-            result = {"tools": TOOLS}
+            result = {"tools": self.tools}
         elif method == "tools/call":
             name = params.get("name")
             args = params.get("arguments", {})
+            started = time.monotonic()
             try:
                 if not isinstance(name, str):
                     raise BridgeError("invalid_argument", "Tool name must be a string.")
                 bridge_method = validate(name, args)
-                bridge_args = {key: value for key, value in args.items() if key != "view"}
-                value = self.client.call(bridge_method, bridge_args)
-                if bridge_method == "ui_observe" and args.get("view") == "decisions":
-                    value = ui_decision_view(value)
+                if bridge_method == "action_status":
+                    value = wait_for_action(self.client, args["action_id"], time.monotonic() + 10,
+                                            cancel_on_timeout=False)
+                else:
+                    value = self.client.call(bridge_method, bridge_arguments(args))
+                if bridge_method == "ui_observe" and args.get("view", "decisions") == "decisions":
+                    value = ui_decision_view(value, **{key: args[key] for key in
+                        ("offset", "page_id", "max_bytes") if key in args})
                 if bridge_method in {"act", "ui_act", "ui_choose"} and not value.get("quitting"):
-                    value = wait_for_action(self.client, value["action"]["action_id"], time.monotonic() + 2,
+                    value = wait_for_action(self.client, value["action"]["action_id"], time.monotonic() + 10,
                                             cancel_on_timeout=False)
                 if bridge_method == "claim":
                     self.client.start_heartbeat()
-                content = [{"type": "text", "text": json.dumps(self.observations.present(value, full=bridge_method == "observe"), ensure_ascii=False,
-                                                               separators=(",", ":"))}]
+                value = self.observations.present(value, full=args.get("mode") == "full", since=args.get("since"))
+                if bridge_method == "ping":
+                    value = {**value, "gameplay_guide": value.get("gameplay_guide", gameplay_guide()),
+                             "connector": {"view_version": VIEW_VERSION,
+                             "metrics": {key: dict(item) for key, item in self.metrics.tools.items()}}}
+                self.metrics.record(name, value, elapsed_ms=round((time.monotonic() - started) * 1000))
+                content = [{"type": "text", "text": json.dumps(value, ensure_ascii=False, separators=(",", ":"))}]
                 result = {"content": content, "isError": False}
             except BridgeError as error:
-                result = {"content": [{"type": "text", "text": json.dumps(
-                    {"error": {"code": error.code, "message": error.message}})}], "isError": True}
+                value = {"error": {"code": error.code, "message": error.message}}
+                self.metrics.record(name if isinstance(name, str) else "invalid_tool_call", value,
+                                    elapsed_ms=round((time.monotonic() - started) * 1000))
+                result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False,
+                           separators=(",", ":"))}], "isError": True}
         else:
             return self.error(identifier, -32601, f"Unknown method: {method}")
         return {"jsonrpc": "2.0", "id": identifier, "result": result}

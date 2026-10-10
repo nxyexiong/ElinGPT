@@ -197,6 +197,8 @@ namespace ElinGPT.Mod
 
         private static string LabelOf(GameObject go)
         {
+            var grid = go.GetComponent<ButtonGrid>();
+            if (grid?.Card is Card card) return Clean(card.Name);
             string own = Clean(TextOf(go));
             if (own.Length != 0) return own;
             var labels = go.GetComponentsInChildren<Text>(false).Where(t => Visible(t.gameObject) && !Sensitive(t.gameObject))
@@ -362,6 +364,7 @@ namespace ElinGPT.Mod
                 ["focused"] = EventSystem.current?.currentSelectedGameObject == go,
                 ["sensitive"] = sensitive,
                 ["pointer_hint"] = go.GetComponentInParent<WidgetMouseover>() != null,
+                ["message_display"] = go.GetComponentInParent<MsgBlock>() != null,
                 ["actions"] = actions,
                 ["bounds"] = new JObject
                 {
@@ -423,6 +426,8 @@ namespace ElinGPT.Mod
             {
                 ["format"] = "gameobject_tree",
                 ["active"] = active,
+                ["pauses_game"] = EClass.ui != null && (EClass.ui.IsPauseGame ||
+                    HasVisibleChild(EClass.ui.transform.Find("ContextMenu"))),
                 ["roots"] = new JArray(roots.Select(Id)),
                 ["nodes"] = nodes,
                 ["truncated"] = queue.Count != 0 || depthClipped,
@@ -471,12 +476,16 @@ namespace ElinGPT.Mod
                     string.Equals(item.key.ToString(), name, StringComparison.OrdinalIgnoreCase));
                 if (binding != null && binding.action == EAction.MouseMiddle && virtualPointer != null)
                 {
-                    var button = virtualPointer.pointerEnter?.GetComponent<UIButton>();
+                    var button = virtualPointer.pointerEnter?.GetComponentInParent<UIButton>();
                     if (button == null || !Usable(button.gameObject) || Occluded(button.gameObject) || !button.CanMiddleClick())
                         throw new BridgeException("ui_action_unavailable", "The hovered control does not support the native middle-click shortcut.");
                     PrepareInput();
                     ApplyPointerContext();
+                    var previousMenu = UIContextMenu.Current;
                     button.OnMiddleClick(true);
+                    var menu = UIContextMenu.Current;
+                    if (menu != null && menu != previousMenu && Visible(menu.gameObject))
+                        SetPointerContext(menu.gameObject, Pointer(menu.gameObject));
                     return;
                 }
                 Keys.Queue(name);
@@ -494,7 +503,6 @@ namespace ElinGPT.Mod
                 case "hover":
                     var hover = Pointer(go);
                     SetPointerContext(go, hover);
-                    ExecuteEvents.Execute(go, hover, ExecuteEvents.pointerEnterHandler);
                     break;
                 case "click":
                 case "right_click":
@@ -578,12 +586,19 @@ namespace ElinGPT.Mod
 
         private void SetPointerContext(GameObject go, PointerEventData pointer)
         {
+            var before = virtualPointer?.hovered.ToArray() ?? Array.Empty<GameObject>();
             pointer.pointerEnter = go;
             pointer.hovered.Clear();
             for (var current = go.transform; current != null; current = current.parent)
                 pointer.hovered.Add(current.gameObject);
             virtualPointer = pointer;
             ApplyPointerContext();
+            foreach (var previous in before)
+                if (previous != null && !pointer.hovered.Contains(previous))
+                    ExecuteEvents.Execute(previous, pointer, ExecuteEvents.pointerExitHandler);
+            foreach (var entered in pointer.hovered.ToArray())
+                if (entered != null && !before.Contains(entered))
+                    ExecuteEvents.Execute(entered, pointer, ExecuteEvents.pointerEnterHandler);
             if (EClass.ui != null) EClass.ui.RefreshActiveState();
         }
 

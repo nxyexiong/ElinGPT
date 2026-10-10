@@ -195,6 +195,7 @@ namespace ElinGPT.Core
             {
                 case "ping":
                     return new JObject { ["schema_version"] = Protocol.SchemaVersion, ["session_id"] = SessionId,
+                        ["gameplay_guide"] = GameplayGuide.Read(),
                         ["capabilities"] = new JArray("observe", "inspect", "available_actions", "step", "wait", "context", "rotate_held", "cell_variants",
                             "open_ui", "ui_tree", "ui_act", "ui_choose", "ui_set_text", "session_command", "title_navigation", "death_navigation",
                             "control_lease", "request_deduplication") };

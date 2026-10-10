@@ -106,12 +106,14 @@ namespace ElinGPT.Mod
             CaptureDeferredUiGoal();
             var uiState = ui.Read();
             bool hasUI = uiState["active"]!.Value<bool>();
+            bool processing = OwnedGoalRunning && hasUI && uiState["pauses_game"]?.Value<bool>() != true;
+            uiState["processing"] = processing;
             frame.Generation = generation;
             frame.Status = pc.isDead ? "dead" : "playing";
             frame.Ready = !pc.isDead && EClass.player.CanAcceptInput() &&
                 EClass.player.renderExtraTime <= 0 && !Game.IsWaiting && EClass.scene.actionMode is AM_Adv &&
                 !EClass.ui.IsPauseGame && !hasUI;
-            frame.HasUI = hasUI;
+            frame.HasUI = hasUI && !processing;
             frame.Turn = pc.turn;
             frame.Hp = pc.hp;
             var entities = new JArray();
@@ -176,6 +178,7 @@ namespace ElinGPT.Mod
                             ["hide_pillar"] = point.cell.hidePillar
                         } : null,
                         ["has_door"] = point.cell.hasDoor,
+                        ["wall_edge"] = point.cell.isWallEdge,
                         ["object"] = point.cell.obj,
                         ["object_variant"] = point.cell.objDir,
                         ["blocked"] = point.IsBlocked,
@@ -536,6 +539,9 @@ namespace ElinGPT.Mod
                 ownedGoal = EClass.pc.ai;
         }
 
+        private bool OwnedGoalRunning => Playing && ownedGoal != null &&
+            ReferenceEquals(EClass.pc.ai, ownedGoal) && ownedGoal.IsRunning;
+
         public JObject SetUiText(JObject args)
         {
             var command = new JObject
@@ -601,7 +607,7 @@ namespace ElinGPT.Mod
         {
             CaptureDeferredUiGoal();
             if (!actionStarted || Time.frameCount <= firstFrame + 1 || ui.HasQueuedInput) return null;
-            bool runningGoal = Playing && ownedGoal != null && ReferenceEquals(EClass.pc.ai, ownedGoal) && ownedGoal.IsRunning;
+            bool runningGoal = OwnedGoalRunning;
             if (runningGoal) return null;
             if (!frame.Ready && frame.Status != "title" && !(frame.HasUI && !runningGoal)) return null;
             actionStarted = false;

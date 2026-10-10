@@ -18,6 +18,7 @@ namespace ElinGPT.Tests
         public int Executions, Cancellations, Turn;
         public int Hp = 100;
         public bool Ready = true, Menu, Pause, Complete, ThrowDuringExecute;
+        public bool ProcessingUI;
         public bool QuitRequested { get; private set; }
         public int Saves, TextEdits, UiExecutions, SessionCommands;
         public Action<JObject>? UiAction;
@@ -38,7 +39,7 @@ namespace ElinGPT.Tests
                 Generation = Generation,
                 Status = Status,
                 Ready = Ready,
-                HasUI = Menu,
+                HasUI = Menu && !ProcessingUI,
                 Turn = Turn,
                 Hp = Hp,
                 RevisionData = GeometryOnly ? new JObject { ["stable"] = true } : null,
@@ -51,6 +52,7 @@ namespace ElinGPT.Tests
                     ["ui"] = new JObject
                     {
                         ["active"] = Menu,
+                        ["processing"] = ProcessingUI,
                         ["format"] = "gameobject_tree",
                         ["roots"] = new JArray("canvas"),
                         ["nodes"] = new JArray(new JObject { ["id"] = "canvas", ["parent_id"] = null, ["role"] = "canvas" })
@@ -212,6 +214,30 @@ namespace ElinGPT.Tests
             Check(!bridge.HasController && !game.Pause, "Unavailable game releases ownership and agent pause");
         }
 
+        private static void ProcessingWindowChecks()
+        {
+            var game = new FakeGame { Menu = true, Ready = false };
+            var bridge = Make(game);
+            bridge.Tick();
+            Result(Send(bridge, "claim", new JObject { ["name"] = "Processor" }));
+            game.UiAction = _ => { game.ProcessingUI = true; game.Complete = false; };
+            var input = Revision(bridge);
+            input["operation"] = "click";
+            input["node_id"] = "ingredient";
+            string action = Result(Send(bridge, "ui_act", input))["action"]!["action_id"]!.Value<string>()!;
+            var status = Result(Send(bridge, "action_status", new JObject { ["action_id"] = action }));
+            Check(status["action"]!["status"]!.Value<string>() == "running" && !game.Pause,
+                "A native nonpausing processing window does not freeze an owned job");
+            Check(status["observation"]!["state"]!["ui"]!["active"]!.Value<bool>(),
+                "The visible processing UI remains observable");
+            game.ProcessingUI = false;
+            game.Complete = true;
+            bridge.Tick();
+            status = Result(Send(bridge, "action_status", new JObject { ["action_id"] = action }));
+            Check(status["action"]!["status"]!.Value<string>() == "completed" && game.Pause,
+                "Processing completion restores the visible UI decision boundary");
+        }
+
         private static void DeathChecks()
         {
             foreach (bool fatalUi in new[] { false, true })
@@ -248,6 +274,7 @@ namespace ElinGPT.Tests
                     var args = Revision(bridge); args["kind"] = kind;
                     Check(Error(Send(bridge, "act", args)) == "not_ready", "World actions stay blocked while dead: " + kind);
                 }
+
                 Check(Error(Send(bridge, "available_actions", Revision(bridge))) == "not_ready",
                     "Death cannot discover world actions");
                 foreach (string command in new[] { "save", "pause_menu", "return_to_title", "quit" })
@@ -432,6 +459,29 @@ namespace ElinGPT.Tests
             state["turn"] = 2;
             Check(ElinGPT.Mod.UiRevision.Create(state)["turn"]!.Value<int>() == 2,
                 "World state remains part of the semantic revision");
+            var fading = JObject.Parse(@"{'ui':{'nodes':[
+                {'id':'log','role':'container','child_count':1,'actions':[]},
+                {'id':'message','message_display':true,'text':'A message','actions':[]},
+                {'id':'hidden','visible':false,'text':'Hidden'},
+                {'id':'button','role':'button','visible':true,'label':'Read','actions':['click']}
+            ]},'messages':[{'index':1,'text':'A message'}]}");
+            var fadingBaseline = ElinGPT.Mod.UiRevision.Create(fading);
+            fading["ui"]!["nodes"]![0]!["child_count"] = 0;
+            ((JArray)fading["ui"]!["nodes"]!).RemoveAt(1);
+            fading["ui"]!["nodes"]![1]!["text"] = "Changed while hidden";
+            Check(JToken.DeepEquals(fadingBaseline, ElinGPT.Mod.UiRevision.Create(fading)),
+                "Fading log nodes and hidden layout churn do not invalidate current decisions");
+            fading["messages"]![0]!["text"] = "A new message";
+            Check(!JToken.DeepEquals(fadingBaseline, ElinGPT.Mod.UiRevision.Create(fading)),
+                "New world messages remain semantic changes");
+            fading["messages"]![0]!["text"] = "A message";
+            fading["ui"]!["nodes"]![1]!["visible"] = true;
+            Check(!JToken.DeepEquals(fadingBaseline, ElinGPT.Mod.UiRevision.Create(fading)),
+                "Previously hidden UI becoming visible invalidates the observation");
+            fading["ui"]!["nodes"]![1]!["visible"] = false;
+            fading["ui"]!["nodes"]![2]!["actions"] = new JArray();
+            Check(!JToken.DeepEquals(fadingBaseline, ElinGPT.Mod.UiRevision.Create(fading)),
+                "A visible control losing interactivity invalidates the observation");
         }
 
         private static void DeferredQuitChecks()
@@ -598,7 +648,7 @@ namespace ElinGPT.Tests
                     Console.WriteLine($"Passed {checks} placement checks.");
                     return 0;
                 }
-                ControllerChecks(); DeathChecks(); FailureChecks(); PumpChecks(); SessionChecks(); GeometryChecks(); DeferredQuitChecks(); ProgressBudgetChecks(); PlacementChecks(); TransportChecks(); CredentialChecks();
+                ControllerChecks(); DeathChecks(); ProcessingWindowChecks(); FailureChecks(); PumpChecks(); SessionChecks(); GeometryChecks(); DeferredQuitChecks(); ProgressBudgetChecks(); PlacementChecks(); TransportChecks(); CredentialChecks();
                 Console.WriteLine($"Passed {checks} core/transport checks.");
                 return 0;
             }

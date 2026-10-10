@@ -18,32 +18,38 @@ REVISION = {
                           "description": "Current observe.revision; stale actions are rejected."},
 }
 DEFINITIONS: list[tuple[str, str, dict[str, Any], list[str]]] = [
-    ("ping", "Check bridge protocol and supported capabilities.", {}, []),
-    ("observe", "Read local terrain, visible entities, inventory, messages and active UI. Terrain includes every valid tile in the square defined by player position +/- limits.radius, without character line-of-sight filtering. Entity visibility and action legality remain restricted.", {}, []),
+    ("ping", "Read bridge capabilities, built-in gameplay guide (axes/UI/world basics), and connector metrics.", {}, []),
+    ("observe", "Read compact state, then deltas. Reuse action observations; use mode=full after losing the baseline. All valid local terrain is preserved.",
+     {"mode": {"type": "string", "enum": ["auto", "full"]},
+      "since": string("Optional last observation_id; mismatch returns a full baseline.")}, []),
     ("claim", "Acquire exclusive control at a game, title-menu or native death-dialog decision boundary. Death retains UI control; user input/F9/disconnect releases it.",
      {"name": string("Agent label shown to the spectator.", maximum=60)}, ["name"]),
     ("release", "Cancel mod-owned activity and release control.", {}, []),
     ("inspect", "Inspect a current visible-entity or top-level inventory handle. Hidden stats are never returned.",
      {"handle": string("Entity handle from observe.")}, ["handle"]),
     ("available_actions", "Discover short-lived normal context actions for a visible local tile.",
-     {**REVISION, "x": {"type": "integer", "minimum": 0}, "z": {"type": "integer", "minimum": 0}},
+     {**REVISION, "x": {"type": "integer", "minimum": 0, "description": "Map x; increases east."},
+      "z": {"type": "integer", "minimum": 0, "description": "Map z; increases north, not south."}},
      ["session_id", "expected_revision", "x", "z"]),
-    ("act", "Submit ONE bounded normal game action. rotate_held cycles the held placement recipe's native variant without placing it; inspect state.placement and discover context actions again before building. MCP waits for completion or a UI decision and returns fresh state. Never resubmit an accepted action blindly.",
+    ("act", "One normal action; waits up to 10s and returns fresh state/delta. Poll if still running; never resubmit. rotate_held changes orientation only; rediscover placement actions afterward.",
      {**REVISION, "kind": {"type": "string", "enum": ["wait", "step", "context", "rotate_held", "open_ui"]},
-      "dx": {"type": "integer", "minimum": -1, "maximum": 1},
-      "dz": {"type": "integer", "minimum": -1, "maximum": 1},
+      "dx": {"type": "integer", "minimum": -1, "maximum": 1, "description": "+1 east, -1 west (local screen down-right/up-left)."},
+      "dz": {"type": "integer", "minimum": -1, "maximum": 1, "description": "+1 north, -1 south (local screen up-right/down-left)."},
       "action_handle": string("ID from available_actions."),
       "menu": {"type": "string", "enum": ["inventory", "character", "abilities", "journal"]},
       "reason": string("Short public action rationale (not private chain-of-thought).", maximum=180)},
      ["session_id", "expected_revision", "kind"]),
-    ("action_status", "Read status and an observation delta against base_revision. Apply state_delta replacements, UI upsert/removed by ID, and terrain_delta upsert/removed by (x,z), retaining order unless supplied. Terrain removals mean leaving the observation window, not destroyed terrain; an observed empty tile has block=0. Observe resets a full baseline. Poll running actions; never resubmit them.",
+    ("action_status", "Wait up to 10s for this accepted action's decision boundary; return status and observation changes. Never resubmit a running action.",
      {"action_id": string("ID returned by act or ui_act.")}, ["action_id"]),
-    ("ui_observe", "Read the generic runtime UI GameObject tree. Use view=decisions for compact visible text/controls, prioritizing modal windows and tooltips; view=tree (default) includes hierarchy, components, bounds and events. Query a subtree when truncated or summary_omitted is nonzero.",
+    ("ui_observe", "Read a page of exact visible UI text/controls (default). Continue with next_offset and page_id. view=tree explicitly requests bounded debug metadata. Query subtrees if truncated.",
      {"root_id": string("Optional node ID for a subtree."),
       "depth": {"type": "integer", "minimum": 0, "maximum": 32},
       "limit": {"type": "integer", "minimum": 1, "maximum": 4096},
       "include_inactive": {"type": "boolean"},
-      "view": {"type": "string", "enum": ["tree", "decisions"]}}, []),
+      "view": {"type": "string", "enum": ["tree", "decisions"]},
+      "offset": {"type": "integer", "minimum": 0, "maximum": 4096},
+      "page_id": string("Page identity from the same UI query; required for offset>0."),
+      "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 65536}}, []),
     ("ui_act", "Operate an advertised node using Unity events or an in-game key. MCP waits for queued input and returns fresh state. In decision views, node.action_set indexes ui.action_sets. Inventory uses click-to-carry/click-to-place; ui.drag_active reports a carried item. No OS input injection.",
      {**REVISION,
       "operation": {"type": "string", "enum": ["click", "right_click", "hover", "focus", "submit", "cancel",
@@ -69,7 +75,7 @@ DEFINITIONS: list[tuple[str, str, dict[str, Any], list[str]]] = [
      ["session_id", "expected_revision", "command"]),
     ("cancel", "Cancel only current mod-owned activity without releasing the lease.", {}, []),
 ]
-TOOLS = [{
+ALL_TOOLS = [{
     "name": f"elin_{name}", "description": description,
     "inputSchema": {"type": "object", "properties": properties,
                     "required": required, "additionalProperties": False},
@@ -77,7 +83,13 @@ TOOLS = [{
                                            "action_status", "ui_observe"},
                     "openWorldHint": False},
 } for name, description, properties, required in DEFINITIONS]
-TOOL_MAP = {tool["name"]: tool for tool in TOOLS}
+TOOLS = [tool for tool in ALL_TOOLS if tool["name"] not in {"elin_ui_choose", "elin_ui_set_text"}]
+TOOL_MAP = {tool["name"]: tool for tool in ALL_TOOLS}
+
+
+def bridge_arguments(args: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in args.items()
+            if key not in {"view", "mode", "since", "offset", "page_id", "max_bytes"}}
 
 
 def validate(name: str, args: Any) -> str:
@@ -131,4 +143,9 @@ def validate(name: str, args: Any) -> str:
                 raise BridgeError("invalid_argument", f"{operation} requires {key}.")
         if operation == "set_text" and not isinstance(args["value"], str):
             raise BridgeError("invalid_argument", "set_text requires a string value.")
+    if name == "elin_ui_observe":
+        if args.get("view") == "tree" and any(key in args for key in ("offset", "page_id", "max_bytes")):
+            raise BridgeError("invalid_argument", "Paging and max_bytes apply only to the decisions view.")
+        if args.get("offset", 0) and "page_id" not in args:
+            raise BridgeError("invalid_argument", "UI continuation requires page_id.")
     return name.removeprefix("elin_")

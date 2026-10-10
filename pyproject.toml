@@ -15,3 +15,6 @@ elingpt = "elingpt.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["elingpt*"]
+
+[tool.setuptools.package-data]
+elingpt = ["gameplay_guide.json"]

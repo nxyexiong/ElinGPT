@@ -98,6 +98,36 @@ python -m elingpt mcp
 The second command is a long-lived MCP stdio server, intended to be launched by
 your agent client. It does not autonomously play and does not claim control
 until an agent explicitly calls `elin_claim`.
+The CLI `observe` command now prints the same compact full view used by agents.
+Use `python -m elingpt observe --raw` only when you need the large, unchanged
+native bridge snapshot for debugging.
+
+### Built-in gameplay guide
+
+MCP initialization and the standalone runner include concise game instructions.
+`elin_ping` returns the guide on demand, and native bridge `ping` embeds the
+same `gameplay_guide` for non-Python clients. The single source is
+`src\elingpt\gameplay_guide.json`, bundled in the Python package and Core DLL.
+It is not repeated in every observation. It covers coordinate spaces, world
+actions versus UI input, turns, item carry/quick-use, backpack capacity, crafting,
+equipment, survival and normal save/death flows.
+
+**Map coordinates are not screen pixels:**
+
+| Direction | `dx` | `dz` | Local isometric screen movement |
+| --- | ---: | ---: | --- |
+| North | 0 | +1 | Up-right |
+| South | 0 | -1 | Down-left |
+| East | +1 | 0 | Down-right |
+| West | -1 | 0 | Up-left |
+
+The overworld is top-down: east is right, north is up. On a local map,
+screen-up is `(-1,+1)` and screen-left is `(-1,-1)`. Higher `z` means **north**,
+not south. Native `EInput.UpdateAxis` maps Up to positive y; `AM_Adv.AxisMove`
+adds that to map z. `Point.Position` projects local tiles using `(x+z,z-x)`;
+`Point.PositionTopdown` uses `(x,z)`. The bridge's `step` adds dx/dz directly
+to map coordinates, independent of the user's alternate keyboard-axis setting.
+Local and overworld coordinates are separate; always check zone and arrival.
 
 To register it with Copilot CLI, run from this project folder:
 
@@ -131,13 +161,16 @@ Example MCP client configuration (adapt the enclosing key to your client):
 
 Available tools: `elin_ping`, `elin_observe`, `elin_claim`, `elin_release`,
 `elin_inspect`, `elin_available_actions`, `elin_act`, `elin_action_status`,
-`elin_ui_observe`, `elin_ui_act`, `elin_ui_choose`, `elin_ui_set_text`, `elin_session_command`,
+`elin_ui_observe`, `elin_ui_act`, `elin_session_command`,
 `elin_cancel`.
+The two legacy UI aliases remain accepted. Add `mcp --compat-tools` to advertise
+`elin_ui_choose` and `elin_ui_set_text` as well; normal clients need only 12 tools.
 
 An agent should claim control, observe, discover context actions when needed,
 submit **one** action with the current `session_id`/`expected_revision`, then
-query its `action_id` until it completes or needs UI. Use a fresh observation
-before operating an advertised UI node. `awaiting_ui` is not failure and not a
+query its `action_id` only while it is still running. The action response already
+contains fresh observation changes; do not request a redundant full snapshot
+before every action. `awaiting_ui` is not failure and not a
 reason to resubmit the world action. `stale_observation` means observe again.
 Visible traversable local tiles also advertise `Walk here`: native pathfinding
 to that tile, not teleportation or a sequence of scripted steps. It shares the
@@ -145,14 +178,15 @@ normal action ownership, interruption and timeout rules, and verifies arrival.
 Stepping beyond a map edge uses the game's native border-exit checks and may
 open its normal travel confirmation; resolve that UI before another world action.
 Network errors with `outcome_unknown` must not be blindly retried.
-MCP polls submitted actions for up to two seconds and returns their status plus
+MCP polls submitted actions, and explicit status queries, for up to ten seconds
+internally and returns their status plus
 fresh state, including deferred quit acknowledgement. If still `running`, poll
 `action_status` rather than resubmitting. Explicit
 `observe`/`ping` may reconnect after a lost connection or native quit; they never
 replay a mutation or reacquire control. Other operations remain blocked until
 that explicit read succeeds.
 The UI adapter is a **generic runtime GameObject tree**, not a list of supported
-screens or hand-written dialogue handlers. `ui_observe` returns canvas roots and
+screens or hand-written dialogue handlers. `ui_observe(view="tree")` returns canvas roots and
 flat nodes connected by `parent_id`. Each node includes its hierarchy path,
 component types, role, text/label, active/enabled/visible/interactable/occluded
 state, focus, screen-space bounds, values/options and advertised operations.
@@ -163,12 +197,22 @@ Snapshots are bounded. When `truncated` is true, query `root_id`, `depth`,
 MCP and model-runner observations use a compact `decision_nodes` projection:
 visible text and advertised controls retain their IDs, while verbose component,
 event and geometry metadata is omitted. Parent IDs refer to the full tree, not
-necessarily another summary node. `ui_observe` still returns the unmodified
-generic tree and can resolve those IDs. Terrain is losslessly represented as
-`terrain.columns` plus `terrain.cells` rows. The raw bridge/CLI observation
-format is unchanged.
-For concise standalone UI queries, use `ui_observe(view="decisions")`, optionally
-with a subtree. The default `view="tree"` retains all runtime metadata.
+necessarily another summary node. `ui_observe` defaults to a compact page of
+exact visible text and controls. The full generic tree is an explicit debug
+view and can still resolve those IDs.
+
+The connector's `view_version: 2` is separate from the unchanged native bridge
+protocol. A full observation uses lossless `palette_grid` terrain when smaller
+than ordinary `columns`/`cells` rows. Its `origin` is `[x,z]`; `size` is
+`[width,height]`; `rows[z-offset][x-offset]` indexes `palette`. A null index
+represents an invalid/out-of-map cell, not an empty or unseen cell. Palette
+values follow `columns` excluding `x`, `z` and fields supplied by `defaults`.
+Inventory, entities, ground objects and messages can use `format: "table"`:
+merge `defaults` with `columns` zipped to each row. Optional `missing`
+`[row,column]` pairs distinguish absent fields from explicit null values.
+Lists and row terrain remain valid when smaller. No values are inferred or
+discarded to meet a budget. The Python reference decoder is
+`elingpt.observation.apply_observation(previous, response)`.
 Terrain includes every valid map cell in the square bounded by the player's
 position plus/minus `limits.radius`. Character line-of-sight and `pcSync` do
 not filter terrain: walls still shown on screen must not disappear from the
@@ -187,10 +231,19 @@ Tiles include native `floor_variant`, `block_variant`, `object` and
 flags and `has_door`. Variants are
 native cell direction/shape indices, **not** universal compass headings.
 Wall/fence variants 0 and 1 extend along map x and z respectively; other shapes
-have no asserted axis. The player and visible entities include native `direction` and items
+have no single asserted axis. Variant **2** draws **both axis segments in a
+fixed orientation**; it is **not a universal corner**. Setting all four corners
+to 2 creates protruding arms. For an axis-aligned rectangle, the southeast corner
+`(max x,min z)` uses 2, southwest uses 1, and northeast uses 0. The northwest
+corner can remain empty: native `isWallEdge`, exposed as `wall_edge`, joins the
+x-wall on its east with the z-wall on its south. Such a tile has `block=0` but
+`blocked=true`; it is not an opening. Check segment connectivity rather than filling every
+perimeter tile. `full_wall` is a separate renderer flag, not a corner indicator.
+The player and visible entities include native `direction` and items
 include `placement_state`; ground objects also expose their variant/type.
 Terrain compaction retains all supplied tile fields, and variant-only changes
-are included in terrain deltas. Read `terrain.columns`, not hard-coded indexes.
+are included in terrain deltas. Decode the advertised representation and read
+`terrain.columns`, not hard-coded indexes.
 
 When a buildable item is held, `state.placement` describes its selected native
 recipe, direction, tile type and rotation availability. `act(kind="rotate_held")`
@@ -200,6 +253,13 @@ rediscover context actions before building. Build context actions include
 to their supporting wall) and distinguish `place` from `rotate_existing_block`.
 For existing-block rotation, `target_block_variant` is the current cell variant,
 not a predicted result; observe the resulting tile after completion.
+Hold a wall block and use the target's advertised **Rotate block** action
+(`placement.operation="rotate_existing_block"`). The native cycle is
+`0 -> 1 -> 2 -> 0`; wrapping from 2 to 0 also toggles `cross_wall`, which affects
+material selection at dual-axis joins. Inspect both fields. `rotate_held` affects only the
+placement preview, not existing walls. Remove an extra piece through normal
+dismantling rather than preserving an incorrect wall count. Verify joins and
+the doorway afterward; some wall faces must be approached from inside.
 These actions still use the game's planner, legality checks, costs and goals;
 there is no direct terrain-edit endpoint. Planning uses the requested visible
 tile, not the spectator's mouse target, and discovery restores shared previews.
@@ -211,23 +271,47 @@ position is not an inventory slot; do not infer equipment from that position.
 Repeated action lists use `node.action_set` as an index into `ui.action_sets`.
 Large UI summaries prioritize visible modal windows, tooltips, and floating
 windows before HUD widgets, including short labels, instructions and costs.
-They report `summary_omitted`; use subtree queries to inspect omitted controls.
-If lossless terrain/inventory fills the compact response budget, UI nodes
-retain a 4 KB budget rather than disappearing entirely. Such observations
-can exceed the usual 16 KB target; terrain is never dropped to meet it.
-After an initial baseline, MCP action/status replies can contain `delta: true`
-and `base_revision`. Apply `state_delta` as top-level state replacements,
-`state_removed` as deletions, and `ui_delta.upsert`/`removed` by node ID with the
-supplied UI metadata (and node order when present). Unchanged information is not
-resent. `terrain_delta` upserts rows keyed by the first two columns `(x,z)` and
-removes listed coordinate pairs. Preserve row order and append new rows unless
-an explicit complete `order` is supplied. Its `columns` describe those rows.
+Each page reports `page_id`, `offset`, `next_offset`, `total_nodes`, and
+`summary_omitted`. Continue the **same query** with `offset=next_offset` and
+`page_id`; changing UI/revision produces `stale_ui_page`, requiring a new first
+page. Native `truncated` is separate: query a smaller subtree in that case.
+Snapshots reserve a 4 KB UI page; standalone UI queries default to 8 KB and
+accept `max_bytes` between 1 KB and 64 KB. An indivisible long dialogue may
+exceed that budget and explicitly reports `budget_exceeded`; it is never
+silently dropped. A full observation exceeding the 24 KB target reports
+`budget.exceeded`. These are byte budgets, not claims about model-specific
+token counts. Terrain and inventory are always lossless.
+
+`observe(mode="auto")` is now the default. The first response is a full baseline;
+subsequent observe/action/status responses normally contain `delta: true`,
+`base_id`, `base_revision`, and a new `observation_id`. Apply a delta only to
+its matching baseline. Optional `observe(since=observation_id)` returns a full
+baseline if that cursor no longer matches the connector's per-session cache.
+Use `observe(mode="full")` after losing conversation context. Reconnects, new
+sessions and generation/zone changes also require a new baseline. Full here
+means complete compact state, not the raw Unity tree.
+
+Apply changed top-level fields and `state_delta` replacements; remove
+`meta_removed` top-level fields and `state_removed` state fields.
+`collections_delta` upserts/removes inventory/entities by `handle`,
+ground objects by `(x,z)`, and messages by `index`. Upserts may themselves be
+tables. Canonical collections and terrain cells sort by those keys, avoiding
+repeated coordinate-order lists during movement.
+`ui_delta.meta` contains **only changed** metadata; merge it rather than replacing
+all metadata, then remove `ui_delta.meta_removed`. Upsert/remove nodes by ID,
+retaining order unless `ui_delta.order` is supplied.
+`terrain_delta` upserts rows keyed by the first two columns `(x,z)` and removes
+listed coordinate pairs. Its `columns` describe those rows.
 Removed coordinates have left the observation window; they do not indicate
 destroyed walls. Clearing a wall in an observed cell updates its `block` to 0.
-`observe` always resets a full baseline; do this if a baseline is lost.
+An unchanged observation is a small acknowledgement, not a repeated UI/map.
 Cosmetic text/visibility from the spectator's world-mouseover hint does not
 invalidate semantic revisions. Its live state remains observable, and all
 target controls are still validated at execution time.
+Fading message widgets and hidden layout nodes also do not invalidate decisions;
+the actual message log, visible controls, values, and world state still do.
+Visible generic item-grid buttons expose the card's native display name, including
+in inventory, shops and ingredient selectors; unidentified items remain unidentified.
 Hidden/inactive text and password/PIN field values are not returned.
 `ui_act` targets an advertised `node_id` and performs `click`, `right_click`, `hover`,
 `focus`, `submit`, `cancel`, `set_text`, `end_edit`, `set_value`, `scroll`,
@@ -244,6 +328,11 @@ action remains pending until that input has been delivered.
 Native jobs started by queued UI callbacks remain owned until they finish.
 Visible modal layers and context menus pause for decisions; retained but hidden
 windows do not stop crafting or other work in progress.
+Visible progress windows also keep running while a mod-owned native job is active
+and the game's layer declares `pauseGame=false`. `ui.processing` reports this;
+`ui.pauses_game` preserves the native modal/context-menu pause signal. The same
+window becomes a decision boundary when the job finishes. This follows the
+generic layer contract, not a per-crafting-screen whitelist.
 After a native overlay closes, noninteractive wake/load transitions can finish
 before the idle decision pause is restored.
 Inventory items use the game's **click-to-carry, then click-to-place** behavior;
@@ -262,6 +351,10 @@ control through the shared `UIButton` contract, allowing item-action menus.
 While controlled, native Unity mouse-position reads use the same in-process
 pointer as UI events; no desktop cursor movement is sent. This keeps native
 context menus from closing because of a different physical pointer position.
+Entering/leaving a virtual pointer target delivers the corresponding ancestor
+events. Opening a native middle-click context menu moves the virtual pointer
+onto that menu without selecting an option, preserving its normal leave-to-close
+behavior while an agent reads its choices.
 The mod never automatically skips dialogue.
 `ui_choose` and `ui_set_text` remain compatibility aliases for generic node
 click/text operations; new clients should use `ui_act`.
@@ -300,14 +393,26 @@ Set its credential in an environment variable, default `OPENAI_API_KEY`; use
 `--key-env` for another variable. Keys remain outside the mod and are not logged.
 No model requests are made by building or checking this repository.
 
-The runner retains four recent tool-call turns, allows at most one mutation per
-model response, maintains the ownership heartbeat while the model is thinking,
-and stops on takeover, acknowledged quit, connection loss or budgets.
+The runner supplies one current compact state and reuses action-result snapshots.
+It retains at most four recent tool-call turns within a 16 KB history target,
+without replaying full snapshots inside those turns. The latest tool-call/result
+group remains intact even if unusually large. The objective remains in the
+system prompt. It allows at most one mutation per model response, maintains the
+ownership heartbeat while the model is thinking, and stops on takeover,
+acknowledged quit, connection loss or budgets.
 It uses the same UI tree/operations in title menus, native death/revival dialogs,
 gameplay and custom panels, waiting for death transitions that have no UI.
 An optional `--transcript 'run.jsonl'` creates a new local trace; it contains game
 observations and must not be published accidentally. An installed mod alone
 does not install an agent or a model.
+
+Both `mcp` and `run` accept `--metrics 'metrics.jsonl'` to create a new local
+payload-accounting file. It contains tool names, byte counts, component byte
+counts and timings, never game text or tool arguments. Runner entries include
+provider-reported prompt/completion token usage when supplied. No tokenizer or
+model dependency is required; byte counts are not advertised as exact tokens.
+`elin_ping` also exposes in-memory connector call/byte totals. Metrics and
+transcripts are ignored by Git; existing files are not overwritten.
 
 ## Supported first-version behavior
 
@@ -405,6 +510,25 @@ It moves one item and restores its slot/count in a `finally` block. These checks
 never load a save, save to disk, start a character, skip story dialogue, or launch
 a model. Tree checks reject duplicate IDs/roots, broken parent/depth links and
 exposed sensitive values.
+
+Compact-protocol checks are also read-only by default:
+
+```powershell
+python .\tests\live_tokens.py
+python .\tests\live_tokens.py --exercise-save world_2
+python .\tests\live_tokens.py --exercise-save world_2 --reference-tokenizer o200k_base
+```
+
+The opt-in exercise requires the named disposable save already loaded in Meadow,
+full HP, sufficient stamina, no nearby hostiles and a clear adjacent tile. It
+uses MCP requests through the current connector to step out and back, toggle
+the native inventory, traverse its compact UI pages, and verify the restored
+position, HP, inventory records and window state. Every observed result is
+decoded and compared with stable native state. It does not load/save a world,
+start a model or enter a dungeon. Release any existing controller explicitly
+before running it; the check never steals a lease. The optional reference
+tokenizer requires an already-installed `tiktoken`; it is not a connector
+runtime dependency or a claim about the model's billing tokenizer.
 
 The wire protocol is newline-delimited JSON over IPv4 loopback TCP, not an
 HTTP/browser endpoint. Every request includes `id`, `token`, `method` and object
